@@ -43,6 +43,21 @@ const Navbar = () => {
             <img src="/assets/images/palooza.png" alt="Chat Palooza" width="40" height="40" /> &nbsp;&nbsp;Chat Palooza
           </Box>
         </Typography>
+
+        <Button 
+              color="inherit" 
+              target="_blank"
+              href="https://github.com/paulotaylor/chat-palooza" 
+              sx={{ 
+                mr: 1,
+                '&:hover': {
+                  backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                }
+              }}
+            >
+              GitHub
+            </Button>
+
         
         {currentUser && currentUser.isAnonymous === false ? (
           <div>

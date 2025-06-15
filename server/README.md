@@ -44,7 +44,7 @@ Personas are defined in the personas.json file.
 
 ```json
 [
-      { 
+    { 
       "id": "yoda", 
       "name": "Yoda, The Jedi Master", 
       "description": "Ancient Jedi Master speaking in inverted wisdom", 
@@ -55,8 +55,8 @@ Personas are defined in the personas.json file.
       "personality_traits": ["wise", "patient", "powerful", "humble"],
       "speaking_style": "inverted syntax with Force wisdom and patient teaching",
       "conversation_strengths": ["spiritual wisdom", "patient teaching", "inner strength guidance"]
-  }
-      ...
+    }
+    ...
 ]
 ```
 
