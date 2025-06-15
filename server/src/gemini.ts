@@ -1,0 +1,404 @@
+import { ConversationSession, ConversationSessionListener, AudioBuffer } from "./conversation";
+import { GenerateContentConfig, GenerationConfig, GoogleGenAI, LiveConnectConfig, LiveServerMessage, Modality, Session, Type } from '@google/genai';
+import { getSystemInstructions, resamplePCM16 } from "./utils";
+import { Persona, TranscriptEntry, ConversationRequest } from "../../client/src/types/data";
+import * as crypto from 'crypto';
+
+const ADVANCED_VOICES_MALE = ['Orus', 'Puck', 'Charon', 'Fenrir', 'Enceladus', 'Iapetus', 'Umbriel', 'Algieba', 'Rasalgethi', 'Alnilam', 'Schedar', 'Achird', 'Zubenelgenubi', 'Sadachbia', 'Sadaltager'];
+const ADVANCED_VOICES_FEMALE = ['Aoede', 'Leda', 'Zephyr', 'Kore', 'Callirrhoe', 'Autonoe', 'Despina', 'Erinome', 'Laomedeia', 'Achernar', 'Gacrux', 'Pulcherrima', 'Vindemiatrix', 'Sulafat'];
+const VOICES_MALE = ['Orus', 'Puck', 'Charon', 'Fenrir'];
+const VOICES_FEMALE = ['Aoede', 'Leda', 'Zephyr', 'Kore'];
+
+const ADVANCED_MODE = process.env.GEMINI_ADVANCED_MODE ? process.env.GEMINI_ADVANCED_MODE === 'true' : true;
+const GEMINI_MODEL_ADVANCED = process.env.GEMINI_MODEL_ADVANCED || 'gemini-2.5-flash-preview-native-audio-dialog';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-live-001';
+
+
+/**
+ * Complete a google genai request
+ * @param request Request to complete
+ * @returns text response
+ */
+export async function completeRequest(request: string, systemInstruction: string | undefined = undefined) : Promise<string | undefined> {
+
+    const apiKey = process.env.GOOGLE_AI_API_KEY;
+    if (!apiKey) {
+        throw new Error('GOOGLE_AI_API_KEY env variable is not set. Please check your .env file.');
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const generationConfig : GenerateContentConfig = {
+        systemInstruction: systemInstruction,
+        temperature: 1,
+        topP: 0.95,
+        maxOutputTokens: 8192,
+        thinkingConfig: {
+            includeThoughts: false,
+            thinkingBudget: 0
+        }
+    };
+    const model = "gemini-2.5-flash-preview-05-20";
+    try {
+        const response = await ai.models.generateContent({model, config: generationConfig, contents: request});
+        return response.text;
+    } catch (error) {
+        console.error('Error completing request:', error);
+        return undefined;
+    }
+}
+
+/**
+ * Gemini Live Session implementation
+ */
+export class GeminiLiveSession implements ConversationSession {
+    id: string; // Session ID
+    listener: ConversationSessionListener | undefined; // Session listener
+    request: ConversationRequest; // Conversation request
+    sessionA: Session | undefined; // Gemini Session A for Persona A
+    sessionB: Session | undefined; // Gemini Session B for Persona B
+    personaA: Persona | undefined; // Persona A
+    personaB: Persona | undefined; // Persona B
+    transcriptionBufferA = ''; // Current transcription buffer for Persona A
+    transcriptionBufferB = ''; // Current transcription buffer for Persona B
+    transcriptionIdA = crypto.randomUUID(); // Current transcription ID for Persona A
+    transcriptionIdB = crypto.randomUUID(); // Current transcription ID for Persona B
+
+    requestStop = false; // Request stop flag
+    shouldStop = false; // Should stop flag
+
+    mediaType = "audio/pcm;rate=16000"; // Media type for audio
+
+    audioBuffers: AudioBuffer[] = []; // Audio buffers
+
+    /**
+     * Constructor
+     * @param listener Conversation session listener
+     * @param request Conversation request
+     */
+    constructor(listener: ConversationSessionListener | undefined, request: ConversationRequest) {
+        this.id = crypto.randomUUID();
+        this.listener = listener;
+        this.request = request;
+        this.personaA = request.personas[0];
+        this.personaB = request.personas[1];
+    }
+
+    getVoice(persona: Persona | undefined): string {
+        if (persona?.voice === "male") {
+            if (ADVANCED_MODE) {
+                return ADVANCED_VOICES_MALE[Math.floor(Math.random() * ADVANCED_VOICES_MALE.length)];
+            }
+            return VOICES_MALE[Math.floor(Math.random() * VOICES_MALE.length)];
+        }
+        if (persona?.voice === "female") {
+            if (ADVANCED_MODE) {
+                return ADVANCED_VOICES_FEMALE[Math.floor(Math.random() * ADVANCED_VOICES_FEMALE.length)];
+            }
+            return VOICES_FEMALE[Math.floor(Math.random() * VOICES_FEMALE.length)];
+        }
+        return 'Kore';
+    }
+
+    /**
+     * Start the conversation
+     */
+    async start(): Promise<void> {
+
+        const apiKey = process.env.GOOGLE_AI_API_KEY;
+        if (!apiKey) {
+            throw new Error('GOOGLE_AI_API_KEY env variable is not set. Please check your .env file.');
+        }
+
+        const ai = new GoogleGenAI({ apiKey });
+        const model = ADVANCED_MODE ? GEMINI_MODEL_ADVANCED : GEMINI_MODEL;
+
+        console.debug('Using Gemini model:', model);
+
+        // Live Connect config
+        const config : LiveConnectConfig = {
+            responseModalities: [Modality.AUDIO],
+            systemInstruction: '',
+            realtimeInputConfig: {
+            automaticActivityDetection: {
+                disabled: false,
+                prefixPaddingMs: 100,
+                silenceDurationMs: 1000,
+            }
+            },
+            speechConfig : {
+            voiceConfig: {
+                prebuiltVoiceConfig: {
+                voiceName: "Kore"
+                }
+            }
+            },
+            outputAudioTranscription: {},
+        };
+
+        // Add tools
+        config.tools = [
+            {
+            functionDeclarations: [
+                {
+                name: 'conversationStopped',
+                description: 'Notify that the conversation has terminated',
+                parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                    },
+                }
+                }
+            ]
+            }
+        ];
+
+        // Get system instructions
+        const {systemInstructionA, systemInstructionB} = getSystemInstructions(this.request);
+
+        // Configure session A for Persona A
+        let configA = {...config};
+        configA.systemInstruction = systemInstructionA;
+        configA.speechConfig = {
+            voiceConfig : {
+                prebuiltVoiceConfig: {
+                    voiceName: this.getVoice(this.personaA) || "Kore"
+                }
+            }
+        };
+
+        // Configure session B for Persona B
+        let configB = {...config};
+        configB.systemInstruction = systemInstructionB;
+        configB.speechConfig = {
+            voiceConfig : {
+                prebuiltVoiceConfig: {
+                    voiceName: this.getVoice(this.personaB) || "Puck"
+                }
+            }
+        };   
+    
+
+        // Create sessions for both personas
+        try {
+            // Session A for Persona A
+            this.sessionA = await ai.live.connect({
+                model: model,
+                config: configA,
+                callbacks: {
+                    onopen: () => console.debug('Session A opened'),
+                    onmessage: (message: LiveServerMessage) => this.handleMessage(this.personaA?.id || '', message),
+                    onerror: (e: any) => console.error('Session A error:', e),
+                    onclose: (e: CloseEvent) => {
+                        if (e.reason) {
+                            console.debug('Session A closed:', e);
+                            this.listener?.onError(e.reason);
+                        }
+                        this.listener?.onSessionEnd();
+                    },
+                }
+            });
+    
+            // Session B for Persona B
+            this.sessionB = await ai.live.connect({
+                model: model,
+                config: configB,
+                callbacks: {
+                    onopen: () => console.debug('Session B opened'),
+                    onmessage: (message: LiveServerMessage) => this.handleMessage(this.personaB?.id || '', message),
+                    onerror: (e: any) => console.error('Session B error:', e),
+                    onclose: (e: CloseEvent) => {
+                        if (e.reason) {
+                            console.debug('Session B closed:', e);
+                            this.listener?.onError(e.reason);
+                        }
+                        this.listener?.onSessionEnd();
+                    },
+                }
+            });
+        } catch (err) {
+            console.error('Failed to setup Gemini Live sessions:', err);
+        }
+        return Promise.resolve();
+    }
+
+    close(): Promise<void> {
+        this.sessionA?.close();
+        this.sessionB?.close();
+        this.listener?.onSessionEnd();
+        this.sessionA = undefined;
+        this.sessionB = undefined;
+        return Promise.resolve();
+    }
+
+    stop(): Promise<void> {
+        console.debug('Stopping conversation');
+        // Set request stop flag
+        // next turn set the tone to stop conversation
+        this.requestStop = true;
+        return Promise.resolve();
+    }
+
+    /**
+     * Handle Gemini Live Session message
+     * @param speakerId Speaker ID
+     * @param message Geimini Live server message
+     */
+    handleMessage (speakerId: string, message: LiveServerMessage): void {
+
+        if (message.setupComplete) {
+            console.debug('Session setup complete', speakerId);
+            if (speakerId === this.personaB?.id) {
+            this.listener?.onSessionStart();
+            // Start the conversation
+            this.sessionB?.sendClientContent({ turns: `Hello, ${this.personaB?.name}!` });
+            }
+            return;
+        }
+
+        if (message.toolCall?.functionCalls) {
+            console.log('Received tool call', speakerId, message.toolCall?.functionCalls);
+            if (message.toolCall?.functionCalls?.[0].name === 'conversationStopped') {
+                // conversation was marked to stop
+                // Stop the conversation
+                console.debug('Conversation stopped', speakerId, message);
+                this.close();
+                return;
+            }
+        }
+    
+        if (message.serverContent?.outputTranscription?.text) {
+            const text = message.serverContent?.outputTranscription?.text;
+            if (speakerId === this.personaA?.id) {
+                // Accumulate delta into buffer
+                this.transcriptionBufferA += text;
+                console.debug('Output transcription', speakerId, message, this.transcriptionIdA, this.transcriptionBufferA);
+                const entry: TranscriptEntry = {
+                    id: this.transcriptionIdA,
+                    speakerId: this.personaA?.id || '',
+                    text: this.transcriptionBufferA,
+                    timestamp: new Date().getTime()
+                }
+                // notify listener
+                this.listener?.onTranscriptEntry(entry);
+            } else if (speakerId === this.personaB?.id) {
+                // Accumulate delta into buffer
+                this.transcriptionBufferB += text;
+                console.debug('Output transcription', speakerId, message, this.transcriptionIdB, this.transcriptionBufferB);
+                const entry: TranscriptEntry = {
+                    id: this.transcriptionIdB,
+                    speakerId: this.personaB?.id || '',
+                    text: this.transcriptionBufferB,
+                    timestamp: new Date().getTime()
+                }
+                // notify listener
+                this.listener?.onTranscriptEntry(entry);
+            }
+            return;
+        }
+        if (message.serverContent?.turnComplete) {
+            // End of turn: finalize and clear buffer
+            console.debug('Turn complete', speakerId);
+            if (speakerId === this.personaA?.id) {
+                this.sessionB?.sendRealtimeInput({
+                audioStreamEnd: true
+                });
+            } else if (speakerId === this.personaB?.id) {
+                this.sessionA?.sendRealtimeInput({
+                audioStreamEnd: true
+                });
+            }
+
+            if (this.requestStop) {
+                // conversation was marked to stop
+                console.log('Request stop', speakerId);
+                this.requestStop = false;
+                const session = speakerId === this.personaA?.id ? this.sessionB : this.sessionA;
+                // send message to the other session to stop the conversation
+                session?.sendClientContent({
+                    turns: 'Unfortunately our time is up we need to wrap up this conversation.'
+                });
+            }
+            return;
+        }
+        if (message.serverContent?.generationComplete) {
+            console.log('Received generation complete', speakerId);
+            if (speakerId === this.personaA?.id) {
+                // check if the transcription buffer is empty or contains the stop conversation message
+                // this is a gemini tool bug where it sometimes sends the conversationStopped() call in the message
+                if (this.transcriptionBufferA.trim().length <= 0 || this.transcriptionBufferA.includes('conversationStopped')) {
+                    this.close();
+                    return;
+                }
+                // reset transcription buffer
+                this.transcriptionBufferA = '';
+                this.transcriptionIdA = crypto.randomUUID();
+            } else if (speakerId === this.personaB?.id) {
+                // check if the transcription buffer is empty or contains the stop conversation message
+                // this is a gemini tool bug where it sometimes sends the conversationStopped() call in the message
+                
+                if (this.transcriptionBufferB.trim().length <= 0 || this.transcriptionBufferB.includes('conversationStopped')) {
+                    this.close();
+                    return;
+                }
+                // reset transcription buffer
+                this.transcriptionBufferB = '';
+                this.transcriptionIdB = crypto.randomUUID();          
+            }
+            if (this.shouldStop) {
+                // conversation was marked to stop
+                console.log('Should stop', speakerId);
+                this.shouldStop = false;
+                this.close();
+            }
+            return;
+        }
+        if (message.serverContent?.modelTurn) {
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (!parts) return;
+            for (const part of parts) {
+                const data = part.inlineData?.data;
+                if (!data) {
+                    console.log('Received empty audio', speakerId, part);
+                    continue;
+                }
+                console.debug('Received audio', speakerId, data.length);
+                const buffer = Buffer.from(data, 'base64');
+                // although gemini sends 24kHz audio, it receives in 16kHz
+                const resampledBuffer = resamplePCM16(buffer, 24000, 16000);
+                const resampledBase64Audio = resampledBuffer.toString('base64');
+                if (speakerId === this.personaA?.id) {
+                    // notify listener
+                    this.listener?.onAudioBuffer({personaId: this.personaA?.id || '', transcriptionId: this?.transcriptionIdA, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"})
+                    // keep audio buffer
+                    this.addAudioBuffer({personaId: this.personaA!.id, transcriptionId: this?.transcriptionIdA, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"});
+                    // send audio to the other session in 16kHz base64 encoded
+                    this.sessionB?.sendRealtimeInput({
+                        audio: {
+                            data: resampledBase64Audio,
+                            mimeType: "audio/pcm;rate=16000"
+                        }
+                    });
+                }
+                if (speakerId === this.personaB?.id) {
+                    // notify listener
+                    this.listener?.onAudioBuffer({personaId: this.personaB?.id || '', transcriptionId: this?.transcriptionIdB, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"})
+                    // keep audio buffer
+                    this.addAudioBuffer({personaId: this.personaB!.id, transcriptionId: this?.transcriptionIdB, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"});
+                    // send audio to the other session in 16kHz base64 encoded
+                    this.sessionA?.sendRealtimeInput({
+                        audio: {
+                            data: resampledBase64Audio,
+                            mimeType: "audio/pcm;rate=16000"
+                        }
+                    });
+                }
+            }
+            return;
+        }
+        console.debug('Received unhandled gemini live message', speakerId, message);
+    };
+
+    addAudioBuffer(audioBuffer: AudioBuffer) {
+        this.audioBuffers.push(audioBuffer);
+    }
+}
