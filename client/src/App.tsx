@@ -6,11 +6,14 @@ import CssBaseline from '@mui/material/CssBaseline';
 import { Box } from '@mui/material';
 import { AuthProvider } from './context/AuthContext';
 import Navbar from './components/common/Navbar';
+import Footer from './components/common/Footer';
 import Home from './pages/Home';
 import Auth from './pages/Auth';
 import Conversation from './pages/Conversation';
 import History from './pages/History';
 import Profile from './pages/Profile';
+import Terms from './pages/Terms';
+import Privacy from './pages/Privacy';
 import { GoogleOAuthProvider } from '@react-oauth/google';
 
 const theme = createTheme({
@@ -59,10 +62,13 @@ function App() {
 
   const AppLayout = () => (
     <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      <Navbar />
-      <Box component="main" sx={{ flexGrow: 1, p: 3 }}>
-        {/* Outlet will render the matched child route */}
-        <Outlet />
+      <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+        <Navbar />
+        <Box component="main" sx={{ flexGrow: 1, p: 3 }}>
+          {/* Outlet will render the matched child route */}
+          <Outlet />
+        </Box>
+        <Footer />
       </Box>
     </Box>
   );
@@ -77,6 +83,8 @@ function App() {
         { path: 'conversation/:id', element: <Conversation /> },
         { path: 'history', element: <History /> },
         { path: 'profile', element: <Profile /> },
+        { path: 'terms', element: <Terms /> },
+        { path: 'privacy', element: <Privacy /> },
         { path: 'assets', element: <div /> }, // Placeholder for /assets/
         { path: '*', element: <Navigate to="/" replace /> }
       ]
