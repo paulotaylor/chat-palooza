@@ -44,6 +44,8 @@ type ConversationState = {
   conversation?: PaloozaConversation;
 };
 
+const cachedConversations = new Map<string, PaloozaConversation>();
+
 const Conversation: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -391,12 +393,25 @@ const Conversation: React.FC = () => {
       // get id from location
       const id = location.pathname.split('/').pop();
       if (id) {
+        const c = cachedConversations.get(id);
+        if (c) {
+          navigate('/conversation/' + id, { state: {
+            topic: c.topic,
+            personas: c.personas,
+            style: c.style,
+            transcript: c.transcript,
+            isLive: false,
+            conversation: c
+          }});
+          return;
+        }
         // load conversation from firestore
         const ref = doc(db, 'conversations', id);
         getDoc(ref).then((doc) => {
           if (doc.exists()) {
             const conversation = doc.data() as PaloozaConversation;
             conversationRef.current = conversation;
+            cachedConversations.set(id, conversation);
             navigate('/conversation/' + id, { state: {
               topic: conversation.topic,
               personas: conversation.personas,
@@ -747,11 +762,13 @@ const Conversation: React.FC = () => {
     setError('');
     setIsSaved(true); // disable save button
 
+    const id = location.pathname.split('/').pop();
+
     const buffer = await waveFile();
     // Save the file
     const blob = new Blob([buffer], { type: 'audio/wav' });
 
-    // save teh blob to Firebase Storage
+    // save the blob to Firebase Storage
     const storageRef = ref(storage, `conversations/${crypto.randomUUID()}.wav`);
     const uploadTask = uploadBytesResumable(storageRef, blob);
     uploadTask.then(snapshot => {
@@ -769,7 +786,7 @@ const Conversation: React.FC = () => {
           console.log('Summary:', summary);
           // save the conversation to Firebase
           const conversation: PaloozaConversation = {
-            id: crypto.randomUUID(),
+            id: id || crypto.randomUUID(),
             userId: currentUser?.uid || '',
             topic: state.topic || '',
             personas: state.personas.map(p => p.id),

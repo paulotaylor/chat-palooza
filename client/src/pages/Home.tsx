@@ -57,6 +57,9 @@ const FeatureCard = styled(Card)(({ theme }) => ({
   },
 }));
 
+let cachedLastConversations: PaloozaConversation[] = [];
+let cachedUpvotedConversations: PaloozaConversation[] = [];
+
 const Home = () => {
   const location = useLocation();
   const [topic, setTopic] = useState('');
@@ -82,6 +85,13 @@ const Home = () => {
   const apiURL = process.env.REACT_APP_API_URL || '';
 
   const loadMostUpvotedConversations = async () => {
+    if (cachedUpvotedConversations.length > 0) {
+      setConversationsMode("upvoted");
+      setConversations(cachedUpvotedConversations);
+      setToastMessage('');
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
 
     setToastMessage('Loading conversations...');
@@ -93,7 +103,8 @@ const Home = () => {
       const conversation = doc.data() as PaloozaConversation;
       return conversation;        
     });
-    setConversationsMode("upvoted")
+    setConversationsMode("upvoted");
+    cachedUpvotedConversations = conversations;
     setConversations(conversations);
     setToastMessage('');
     setIsLoading(false);
@@ -101,6 +112,14 @@ const Home = () => {
 
     // load conversations from Firebase
   const loadLastConversations = async () => {
+
+    if (cachedLastConversations.length > 0) {
+      setConversationsMode("last")
+      setConversations(cachedLastConversations);
+      setToastMessage('');
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
 
     setToastMessage('Loading conversations...');
@@ -112,7 +131,8 @@ const Home = () => {
       const conversation = doc.data() as PaloozaConversation;
       return conversation;        
     });
-    setConversationsMode("last")
+    setConversationsMode("last");
+    cachedLastConversations = conversations;
     setConversations(conversations);
     setToastMessage('');
     setIsLoading(false);
