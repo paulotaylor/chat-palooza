@@ -23,7 +23,7 @@ const { app } = expressWs(express(), undefined, {
 import cors from 'cors';
 import { getUserToken } from './utils';
 import { ConversationSession, AudioBuffer, getStyles } from './conversation';
-import { completeRequest, GeminiLiveSession } from './gemini';
+import { completeRequest, GeminiLiveConversationSession } from './gemini';
 app.use(cors({ origin: true }));
 app.use(cookieParser());
 app.use(express.json());
@@ -315,7 +315,7 @@ app.ws('/client/socket', async function (ws, req) {
 
       const request : ConversationRequest = {personas: [p1, p2], topic: topic, style: s};
 
-      session = new GeminiLiveSession( {
+      session = new GeminiLiveConversationSession( {
         onTranscriptEntry: (entry: TranscriptEntry) => {
           console.debug('transcript entry', entry);
           ws.send(JSON.stringify({

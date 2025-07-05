@@ -1,4 +1,4 @@
-import { ConversationSession, ConversationSessionListener, AudioBuffer } from "./conversation";
+import { ConversationSession, ConversationSessionListener, AudioBuffer, SessionListener, LiveSession } from "./conversation";
 import { GenerateContentConfig, GenerationConfig, GoogleGenAI, LiveConnectConfig, LiveServerMessage, Modality, Session, Type } from '@google/genai';
 import { getSystemInstructions, resamplePCM16 } from "./utils";
 import { Persona, TranscriptEntry, ConversationRequest } from "../../client/src/types/data";
@@ -47,24 +47,14 @@ export async function completeRequest(request: string, systemInstruction: string
     }
 }
 
+
 /**
  * Gemini Live Session implementation
  */
-export class GeminiLiveSession implements ConversationSession {
-    id: string; // Session ID
-    listener: ConversationSessionListener | undefined; // Session listener
-    request: ConversationRequest; // Conversation request
-    sessionA: Session | undefined; // Gemini Session A for Persona A
-    sessionB: Session | undefined; // Gemini Session B for Persona B
-    personaA: Persona | undefined; // Persona A
-    personaB: Persona | undefined; // Persona B
-    transcriptionBufferA = ''; // Current transcription buffer for Persona A
-    transcriptionBufferB = ''; // Current transcription buffer for Persona B
-    transcriptionIdA = crypto.randomUUID(); // Current transcription ID for Persona A
-    transcriptionIdB = crypto.randomUUID(); // Current transcription ID for Persona B
-
-    requestStop = false; // Request stop flag
-    shouldStop = false; // Should stop flag
+export class GeminiLiveSession extends LiveSession {
+    session: Session | undefined; // Gemini Session
+    transcriptionBuffer = ''; // Current transcription buffer
+    transcriptionId = crypto.randomUUID(); // Current transcription ID
 
     mediaType = "audio/pcm;rate=16000"; // Media type for audio
 
@@ -72,25 +62,21 @@ export class GeminiLiveSession implements ConversationSession {
 
     /**
      * Constructor
-     * @param listener Conversation session listener
-     * @param request Conversation request
+     * @param persona Persona
+     * @param systemInstruction System instruction
      */
-    constructor(listener: ConversationSessionListener | undefined, request: ConversationRequest) {
-        this.id = crypto.randomUUID();
-        this.listener = listener;
-        this.request = request;
-        this.personaA = request.personas[0];
-        this.personaB = request.personas[1];
+    constructor(persona: Persona | undefined, systemInstruction: string | undefined = undefined) {
+        super(persona, systemInstruction);
     }
 
-    getVoice(persona: Persona | undefined): string {
-        if (persona?.voice === "male") {
+    getVoice(): string {
+        if (this.persona?.voice === "male") {
             if (ADVANCED_MODE) {
                 return ADVANCED_VOICES_MALE[Math.floor(Math.random() * ADVANCED_VOICES_MALE.length)];
             }
             return VOICES_MALE[Math.floor(Math.random() * VOICES_MALE.length)];
         }
-        if (persona?.voice === "female") {
+        if (this.persona?.voice === "female") {
             if (ADVANCED_MODE) {
                 return ADVANCED_VOICES_FEMALE[Math.floor(Math.random() * ADVANCED_VOICES_FEMALE.length)];
             }
@@ -102,7 +88,7 @@ export class GeminiLiveSession implements ConversationSession {
     /**
      * Start the conversation
      */
-    async start(): Promise<void> {
+    async start() {
 
         const apiKey = process.env.GOOGLE_AI_API_KEY;
         if (!apiKey) {
@@ -117,7 +103,7 @@ export class GeminiLiveSession implements ConversationSession {
         // Live Connect config
         const config : LiveConnectConfig = {
             responseModalities: [Modality.AUDIO],
-            systemInstruction: '',
+            systemInstruction: this.systemInstruction,
             realtimeInputConfig: {
             automaticActivityDetection: {
                 disabled: false,
@@ -128,7 +114,7 @@ export class GeminiLiveSession implements ConversationSession {
             speechConfig : {
             voiceConfig: {
                 prebuiltVoiceConfig: {
-                voiceName: "Kore"
+                voiceName: this.getVoice() || "Kore"
                 }
             }
             },
@@ -151,90 +137,39 @@ export class GeminiLiveSession implements ConversationSession {
             ]
             }
         ];
-
-        // Get system instructions
-        const {systemInstructionA, systemInstructionB} = getSystemInstructions(this.request);
-
-        // Configure session A for Persona A
-        let configA = {...config};
-        configA.systemInstruction = systemInstructionA;
-        configA.speechConfig = {
-            voiceConfig : {
-                prebuiltVoiceConfig: {
-                    voiceName: this.getVoice(this.personaA) || "Kore"
-                }
-            }
-        };
-
-        // Configure session B for Persona B
-        let configB = {...config};
-        configB.systemInstruction = systemInstructionB;
-        configB.speechConfig = {
-            voiceConfig : {
-                prebuiltVoiceConfig: {
-                    voiceName: this.getVoice(this.personaB) || "Puck"
-                }
-            }
-        };   
-    
-
         // Create sessions for both personas
         try {
             // Session A for Persona A
-            this.sessionA = await ai.live.connect({
+            this.session = await ai.live.connect({
                 model: model,
-                config: configA,
+                config: config,
                 callbacks: {
-                    onopen: () => console.debug('Session A opened'),
-                    onmessage: (message: LiveServerMessage) => this.handleMessage(this.personaA?.id || '', message),
-                    onerror: (e: any) => console.error('Session A error:', e),
+                    onopen: () => console.debug('Gemini session opened'),
+                    onmessage: (message: LiveServerMessage) => this.handleMessage(this.persona?.id || '', message),
+                    onerror: (e: any) => console.error('Gemini session error:', e),
                     onclose: (e: CloseEvent) => {
                         if (e.reason) {
-                            console.debug('Session A closed:', e);
-                            this.listener?.onError(e.reason);
+                            console.debug('Gemini session closed:', e);
+                            this.listener?.onError(this, e.reason);
                         }
-                        this.listener?.onSessionEnd();
-                    },
-                }
-            });
-    
-            // Session B for Persona B
-            this.sessionB = await ai.live.connect({
-                model: model,
-                config: configB,
-                callbacks: {
-                    onopen: () => console.debug('Session B opened'),
-                    onmessage: (message: LiveServerMessage) => this.handleMessage(this.personaB?.id || '', message),
-                    onerror: (e: any) => console.error('Session B error:', e),
-                    onclose: (e: CloseEvent) => {
-                        if (e.reason) {
-                            console.debug('Session B closed:', e);
-                            this.listener?.onError(e.reason);
-                        }
-                        this.listener?.onSessionEnd();
+                        this.listener?.onSessionEnd(this);
                     },
                 }
             });
         } catch (err) {
             console.error('Failed to setup Gemini Live sessions:', err);
         }
-        return Promise.resolve();
     }
 
-    close(): Promise<void> {
-        this.sessionA?.close();
-        this.sessionB?.close();
-        this.listener?.onSessionEnd();
-        this.sessionA = undefined;
-        this.sessionB = undefined;
-        return Promise.resolve();
+    async close() {
+        this.session?.close();
+        this.session = undefined;
+        this.listener?.onSessionEnd(this);
+        this.listener = undefined;
     }
 
-    stop(): Promise<void> {
-        console.debug('Stopping conversation');
-        // Set request stop flag
-        // next turn set the tone to stop conversation
-        this.requestStop = true;
+    sendMessage(message: string): Promise<void> {
+        this.session?.sendClientContent({ turns: message });
         return Promise.resolve();
     }
 
@@ -247,11 +182,7 @@ export class GeminiLiveSession implements ConversationSession {
 
         if (message.setupComplete) {
             console.debug('Session setup complete', speakerId);
-            if (speakerId === this.personaB?.id) {
-            this.listener?.onSessionStart();
-            // Start the conversation
-            this.sessionB?.sendClientContent({ turns: `Hello, ${this.personaB?.name}!` });
-            }
+            this.listener?.onSessionStart(this);
             return;
         }
 
@@ -268,88 +199,37 @@ export class GeminiLiveSession implements ConversationSession {
     
         if (message.serverContent?.outputTranscription?.text) {
             const text = message.serverContent?.outputTranscription?.text;
-            if (speakerId === this.personaA?.id) {
-                // Accumulate delta into buffer
-                this.transcriptionBufferA += text;
-                console.debug('Output transcription', speakerId, message, this.transcriptionIdA, this.transcriptionBufferA);
-                const entry: TranscriptEntry = {
-                    id: this.transcriptionIdA,
-                    speakerId: this.personaA?.id || '',
-                    text: this.transcriptionBufferA,
-                    timestamp: new Date().getTime()
-                }
-                // notify listener
-                this.listener?.onTranscriptEntry(entry);
-            } else if (speakerId === this.personaB?.id) {
-                // Accumulate delta into buffer
-                this.transcriptionBufferB += text;
-                console.debug('Output transcription', speakerId, message, this.transcriptionIdB, this.transcriptionBufferB);
-                const entry: TranscriptEntry = {
-                    id: this.transcriptionIdB,
-                    speakerId: this.personaB?.id || '',
-                    text: this.transcriptionBufferB,
-                    timestamp: new Date().getTime()
-                }
-                // notify listener
-                this.listener?.onTranscriptEntry(entry);
+            // Accumulate delta into buffer
+            this.transcriptionBuffer += text;
+            console.debug('Output transcription', speakerId, message, this.transcriptionId, this.transcriptionBuffer);
+            const entry: TranscriptEntry = {
+                id: this.transcriptionId,
+                speakerId: this.persona?.id || '',
+                text: this.transcriptionBuffer,
+                timestamp: new Date().getTime()
             }
+            // notify listener
+            this.listener?.onTranscriptEntry(this, entry);
             return;
         }
         if (message.serverContent?.turnComplete) {
             // End of turn: finalize and clear buffer
             console.debug('Turn complete', speakerId);
-            if (speakerId === this.personaA?.id) {
-                this.sessionB?.sendRealtimeInput({
-                audioStreamEnd: true
-                });
-            } else if (speakerId === this.personaB?.id) {
-                this.sessionA?.sendRealtimeInput({
-                audioStreamEnd: true
-                });
-            }
+            this.listener?.onTurnComplete(this);
 
-            if (this.requestStop) {
-                // conversation was marked to stop
-                console.log('Request stop', speakerId);
-                this.requestStop = false;
-                const session = speakerId === this.personaA?.id ? this.sessionB : this.sessionA;
-                // send message to the other session to stop the conversation
-                session?.sendClientContent({
-                    turns: 'Unfortunately our time is up we need to wrap up this conversation.'
-                });
-            }
             return;
         }
         if (message.serverContent?.generationComplete) {
             console.log('Received generation complete', speakerId);
-            if (speakerId === this.personaA?.id) {
-                // check if the transcription buffer is empty or contains the stop conversation message
-                // this is a gemini tool bug where it sometimes sends the conversationStopped() call in the message
-                if (this.transcriptionBufferA.trim().length <= 0 || this.transcriptionBufferA.includes('conversationStopped')) {
-                    this.close();
-                    return;
-                }
-                // reset transcription buffer
-                this.transcriptionBufferA = '';
-                this.transcriptionIdA = crypto.randomUUID();
-            } else if (speakerId === this.personaB?.id) {
-                // check if the transcription buffer is empty or contains the stop conversation message
-                // this is a gemini tool bug where it sometimes sends the conversationStopped() call in the message
-                
-                if (this.transcriptionBufferB.trim().length <= 0 || this.transcriptionBufferB.includes('conversationStopped')) {
-                    this.close();
-                    return;
-                }
-                // reset transcription buffer
-                this.transcriptionBufferB = '';
-                this.transcriptionIdB = crypto.randomUUID();          
-            }
-            if (this.shouldStop) {
-                // conversation was marked to stop
-                console.log('Should stop', speakerId);
-                this.shouldStop = false;
+            // check if the transcription buffer is empty or contains the stop conversation message
+            // this is a gemini tool bug where it sometimes sends the conversationStopped() call in the message
+            if (this.transcriptionBuffer.trim().length <= 0 || this.transcriptionBuffer.includes('conversationStopped')) {
                 this.close();
+                return;
             }
+            // reset transcription buffer
+            this.transcriptionBuffer = '';
+            this.transcriptionId = crypto.randomUUID();
             return;
         }
         if (message.serverContent?.modelTurn) {
@@ -366,32 +246,8 @@ export class GeminiLiveSession implements ConversationSession {
                 // although gemini sends 24kHz audio, it receives in 16kHz
                 const resampledBuffer = resamplePCM16(buffer, 24000, 16000);
                 const resampledBase64Audio = resampledBuffer.toString('base64');
-                if (speakerId === this.personaA?.id) {
-                    // notify listener
-                    this.listener?.onAudioBuffer({personaId: this.personaA?.id || '', transcriptionId: this?.transcriptionIdA, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"})
-                    // keep audio buffer
-                    this.addAudioBuffer({personaId: this.personaA!.id, transcriptionId: this?.transcriptionIdA, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"});
-                    // send audio to the other session in 16kHz base64 encoded
-                    this.sessionB?.sendRealtimeInput({
-                        audio: {
-                            data: resampledBase64Audio,
-                            mimeType: "audio/pcm;rate=16000"
-                        }
-                    });
-                }
-                if (speakerId === this.personaB?.id) {
-                    // notify listener
-                    this.listener?.onAudioBuffer({personaId: this.personaB?.id || '', transcriptionId: this?.transcriptionIdB, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"})
-                    // keep audio buffer
-                    this.addAudioBuffer({personaId: this.personaB!.id, transcriptionId: this?.transcriptionIdB, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"});
-                    // send audio to the other session in 16kHz base64 encoded
-                    this.sessionA?.sendRealtimeInput({
-                        audio: {
-                            data: resampledBase64Audio,
-                            mimeType: "audio/pcm;rate=16000"
-                        }
-                    });
-                }
+                // notify listener
+                this.listener?.onAudioBuffer(this, {personaId: this.persona?.id || '', transcriptionId: this?.transcriptionId, buffer: resampledBuffer, mediaType: "audio/pcm;rate=16000"})
             }
             return;
         }
@@ -401,4 +257,145 @@ export class GeminiLiveSession implements ConversationSession {
     addAudioBuffer(audioBuffer: AudioBuffer) {
         this.audioBuffers.push(audioBuffer);
     }
+
+    async sendAudio(audioBuffer: AudioBuffer) {
+        this.session?.sendRealtimeInput({
+            audio: {
+                data: audioBuffer.buffer.toString('base64'),
+                mimeType: audioBuffer.mediaType
+            }
+        });
+    }
+
+    async flushAudio() {
+        this.session?.sendRealtimeInput({
+            audioStreamEnd: true
+        });
+    }
 }
+
+
+/**
+ * Gemini Live Conversation Session implementation
+ */
+export class GeminiLiveConversationSession implements ConversationSession, SessionListener {
+    id: string; // Session ID
+    listener: ConversationSessionListener | undefined; // Session listener
+    request: ConversationRequest; // Conversation request
+    sessionA: LiveSession | undefined; // Live Session A for Persona A
+    sessionB: LiveSession | undefined; // Live Session B for Persona B
+
+    requestStop = false; // Request stop flag
+
+    mediaType = "audio/pcm;rate=16000"; // Media type for audio
+
+    audioBuffers: AudioBuffer[] = []; // Audio buffers
+
+    sessionAStarted = false; // Session A started flag
+    sessionBStarted = false; // Session B started flag
+
+    /**
+     * Constructor
+     * @param listener Conversation session listener
+     * @param request Conversation request
+     */
+    constructor(listener: ConversationSessionListener | undefined, request: ConversationRequest) {
+        this.id = crypto.randomUUID();
+        this.listener = listener;
+        this.request = request;
+        const {systemInstructionA, systemInstructionB} = getSystemInstructions(this.request);
+
+        this.sessionA = new GeminiLiveSession(request.personas[0], systemInstructionA);
+        this.sessionB = new GeminiLiveSession(request.personas[1], systemInstructionB);
+        this.sessionA.listener = this;
+        this.sessionB.listener = this;
+    }
+
+    onTranscriptEntry(session: LiveSession, entry: TranscriptEntry): void {
+        this.listener?.onTranscriptEntry(entry);
+    }
+    onAudioBuffer(session: LiveSession, audioBuffer: AudioBuffer): void {
+        this.listener?.onAudioBuffer(audioBuffer);
+        // keep audio buffer
+        this.addAudioBuffer(audioBuffer);
+        if (session.persona?.id === this.sessionA?.persona?.id) {
+            this.sessionB?.sendAudio(audioBuffer);
+        } else if (session.persona?.id === this.sessionB?.persona?.id) {
+            this.sessionA?.sendAudio(audioBuffer);
+        }
+    }
+    onError(session: LiveSession, error: string): void {
+        this.listener?.onError(error);
+        this.close();
+    }
+    onSessionEnd(session: LiveSession): void {
+        if (session.persona?.id === this.sessionA?.persona?.id) {
+            this.sessionB?.close()
+        }
+        if (session.persona?.id === this.sessionB?.persona?.id) {
+            this.sessionA?.close()
+        }
+        this.listener?.onSessionEnd();
+        this.sessionA = undefined;
+        this.sessionB = undefined;
+    }
+
+    onSessionStart(session: LiveSession): void {
+        if (session.persona?.id === this.sessionA?.persona?.id) {
+            this.sessionAStarted = true;
+        } else if (session.persona?.id === this.sessionB?.persona?.id) {
+            this.sessionBStarted = true;
+        }
+        if (this.sessionAStarted && this.sessionBStarted) {
+            this.sessionB?.sendMessage(`Hello, ${this.sessionB.persona?.name}!`);
+            this.listener?.onSessionStart();
+        }
+    }
+    onTurnComplete(session: LiveSession): void {
+        if (session.persona?.id === this.sessionA?.persona?.id) {
+            this.sessionB?.flushAudio();
+            if (this.requestStop) {
+                // conversation was marked to stop
+                console.log('Request stop', session.persona?.id);
+                this.requestStop = false;
+                // send message to the other session to stop the conversation
+                this.sessionB?.sendMessage('Unfortunately our time is up we need to wrap up this conversation.');
+            }
+        } else if (session.persona?.id === this.sessionB?.persona?.id) {
+            this.sessionA?.flushAudio();
+            if (this.requestStop) {
+                // conversation was marked to stop
+                console.log('Request stop', session.persona?.id);
+                this.requestStop = false;
+                // send message to the other session to stop the conversation
+                this.sessionA?.sendMessage('Unfortunately our time is up we need to wrap up this conversation.');
+            }
+        }
+    }
+
+    /**
+     * Start the conversation
+     */
+    async start() {
+        this.sessionA?.start();
+        this.sessionB?.start();
+    }
+
+    async close() {
+        this.sessionA?.close();
+        this.sessionB?.close();
+        this.listener?.onSessionEnd();
+        this.sessionA = undefined;
+        this.sessionB = undefined;
+        return Promise.resolve();
+    }
+
+    async stop() {
+        this.requestStop = true;
+    }
+
+    addAudioBuffer(audioBuffer: AudioBuffer) {
+        this.audioBuffers.push(audioBuffer);
+    }
+}
+

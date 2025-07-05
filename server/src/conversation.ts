@@ -1,4 +1,4 @@
-import { ConversationStyle, TranscriptEntry, ConversationRequest } from "../../client/src/types/data";
+import { ConversationStyle, TranscriptEntry, ConversationRequest, Persona } from "../../client/src/types/data";
 import * as fs from 'fs';
 
 /**
@@ -47,4 +47,50 @@ export function getStyleById(id: string): ConversationStyle | undefined {
 
 export function getStyles(): ConversationStyle[] {
     return styles;
+}
+
+/**
+ * Session listener interface
+ */
+export interface SessionListener {
+    onTranscriptEntry(session: LiveSession, entry: TranscriptEntry): void;
+    onAudioBuffer(session: LiveSession, audioBuffer: AudioBuffer): void;
+    onError(session: LiveSession, error: string): void;
+    onSessionEnd(session: LiveSession): void;
+    onSessionStart(session: LiveSession): void;
+    onTurnComplete(session: LiveSession): void;
+}
+
+/**
+ * Live session class for realtime models implementation like Gemini, OpenAI Realtime, etc
+ */
+export class LiveSession {
+    persona: Persona | undefined; // Persona
+    listener: SessionListener | undefined;
+    systemInstruction: string | undefined; // System instruction
+    constructor(persona: Persona | undefined, systemInstruction: string | undefined = undefined) {
+        this.persona = persona;
+        this.systemInstruction = systemInstruction;
+    }
+
+    async start() {
+        
+    }
+
+    async close() {
+
+    }
+
+    async sendMessage(message: string) {
+
+    }
+
+    async sendAudio(audioBuffer: AudioBuffer) {
+
+    }
+
+    async flushAudio() {
+
+    }
+
 }
